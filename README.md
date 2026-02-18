@@ -1,36 +1,38 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+OpenClaw-ChatBot
+A lightweight Next.js (App Router) chatbot demo that exposes a simple chat API and a React widget UI.
 
-## Getting Started
+This README documents the current workflow for development, local running, and key files in the repository.
 
-First, run the development server:
+Project structure (high level)
+app/ — Next.js App Router pages and API routes
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
-```
+app/api/chat/route.ts — serverless chat API endpoint
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+page.tsx, layout.tsx — app entry points
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+components/chatbot/ — React components for the widget
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+ChatbotWidget.tsx — main widget wrapper
 
-## Learn More
+ChatInput.tsx — input/submit UI
 
-To learn more about Next.js, take a look at the following resources:
+ChatMessage.tsx — message rendering
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+lib/
+apiClient.ts — client helper for API requests cuurently we are not using this ..
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+public/ — static assets
 
-## Deploy on Vercel
+Requirements
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+Node.js 18+ recommended
+npm (or yarn/pnpm)
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+API & Client
+The chat server route is implemented in app/api/chat/route.ts.
+Client helpers are provided in lib/apiClient.ts. Update this file if you need custom headers, auth, or retry logic.
+Typical client flow:
+
+UI component (ChatInput) POSTs a payload to /api/chat
+Server route forwards to model/provider and returns streaming or JSON response
+UI (ChatMessage) renders messages and updates state
