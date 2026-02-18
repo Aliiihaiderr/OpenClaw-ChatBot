@@ -17,7 +17,10 @@ export default function ChatbotWidget() {
     const [messages, setMessages] = useState<Message[]>([
       { 
         role: "assistant", 
-        content: "👋 Hi! I'm the Builderz assistant. Ask me anything about our blockchain development services, projects, or how we can help bring your Web3 ideas to life!" 
+        content:
+        "👋 Hi! I'm the Builderz assistant.\n" +
+        "Ask me anything about our blockchain development services, projects, or\n" +
+        "how we can help bring your Web3 ideas to life!"
       },
     ]);
     const [input, setInput] = useState<string>('')
