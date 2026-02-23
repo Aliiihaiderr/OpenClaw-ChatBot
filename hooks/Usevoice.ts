@@ -24,14 +24,18 @@ export function useVoice({
   onTranscript,
   lang = "en-US",
 }: UseVoiceOptions = {}): UseVoiceReturn {
-  const recognitionRef = useRef<SpeechRecognition | null>(null);
 
   const [isListening, setIsListening] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [sttSupported, setSttSupported] = useState(false);
   const [ttsSupported, setTtsSupported] = useState(false);
 
-  // ── Streaming TTS state ──────────────────────────────────────────────────
+  // ── Deepgram STT refs ─────────────────────────────────────────────────────
+  const socketRef = useRef<WebSocket | null>(null);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+
+  // ── Streaming TTS state ───────────────────────────────────────────────────
   const sentenceQueueRef = useRef<string[]>([]);
   const speakingRef = useRef(false);
   const streamBufferRef = useRef("");
@@ -41,9 +45,7 @@ export function useVoice({
   // Detect browser support (client-side only)
   useEffect(() => {
     if (typeof window === "undefined") return;
-    setSttSupported(
-      "SpeechRecognition" in window || "webkitSpeechRecognition" in window
-    );
+    setSttSupported(true); // always true with Deepgram
     setTtsSupported("speechSynthesis" in window);
   }, []);
 
@@ -66,16 +68,12 @@ export function useVoice({
     if (typeof window === "undefined") return html;
     const parser = new DOMParser();
     const doc = parser.parseFromString(html, "text/html");
-    doc
-      .querySelectorAll("h1,h2,h3")
-      .forEach((el) => {
-        el.textContent = el.textContent?.trim() + ". ";
-      });
-    doc
-      .querySelectorAll("p,li")
-      .forEach((el) => {
-        el.textContent = el.textContent?.trim() + ". ";
-      });
+    doc.querySelectorAll("h1,h2,h3").forEach((el) => {
+      el.textContent = el.textContent?.trim() + ". ";
+    });
+    doc.querySelectorAll("p,li").forEach((el) => {
+      el.textContent = el.textContent?.trim() + ". ";
+    });
     return doc.body.textContent?.replace(/\s+/g, " ").trim() || "";
   };
 
@@ -186,7 +184,6 @@ export function useVoice({
       stopSpeakingInternal();
 
       const cleanText = htmlToSpeechText(text);
-
       const sentences =
         cleanText.match(/[^.!?]+[.!?]+[\s"')\]]*|[^.!?]+$/g) || [cleanText];
       streamActiveRef.current = false;
@@ -215,47 +212,104 @@ export function useVoice({
   }, []);
 
   // ─────────────────────────────────────────────
-  // 🎙 Speech-to-Text (STT)
+  // 🎙 STT — Deepgram via WebSocket
   // ─────────────────────────────────────────────
-  const startListening = useCallback(() => {
-    if (!sttSupported || typeof window === "undefined") return;
+  const startListening = useCallback(async () => {
+    if (typeof window === "undefined") return;
 
-    const SpeechRecognition =
-      window.SpeechRecognition || (window as any).webkitSpeechRecognition;
-    const recognition = new SpeechRecognition();
-    recognition.lang = lang;
-    recognition.interimResults = true;
-    recognition.continuous = false;
+    try {
+      // 1️⃣ Get short-lived token from backend
+      const res = await fetch("/api/stt");
+      const { token } = await res.json();
 
-    recognition.onresult = (event: SpeechRecognitionEvent) => {
-      let interimText = "";
-      let finalText = "";
-      for (let i = event.resultIndex; i < event.results.length; i++) {
-        const t = event.results[i][0].transcript;
-        if (event.results[i].isFinal) finalText += t;
-        else interimText += t;
+      if (!token) {
+        console.error("No STT token received");
+        return;
       }
-      if (finalText) onTranscript?.(finalText, true);
-      else if (interimText) onTranscript?.(interimText, false);
-    };
 
-    recognition.onstart = () => setIsListening(true);
-    recognition.onend = () => {
-      setIsListening(false);
-      recognitionRef.current = null;
-    };
-    recognition.onerror = (e: SpeechRecognitionErrorEvent) => {
-      console.error("STT error:", e.error);
-      setIsListening(false);
-      recognitionRef.current = null;
-    };
+      // 2️⃣ Open Deepgram WebSocket with token
+      const socket = new WebSocket(
+        `wss://api.deepgram.com/v1/listen?model=nova-2&language=en&interim_results=true&punctuate=true&endpointing=300`,
+        ["token", token]
+      );
 
-    recognitionRef.current = recognition;
-    recognition.start();
-  }, [sttSupported, lang, onTranscript]);
+      socketRef.current = socket;
+
+      socket.onopen = async () => {
+        try {
+          // 3️⃣ Request mic access
+          const micStream = await navigator.mediaDevices.getUserMedia({
+            audio: true,
+          });
+          streamRef.current = micStream;
+
+          // 4️⃣ Start MediaRecorder — send 250ms chunks
+          const recorder = new MediaRecorder(micStream, {
+            mimeType: "audio/webm",
+          });
+          recorderRef.current = recorder;
+
+          recorder.ondataavailable = (e) => {
+            if (e.data.size > 0 && socket.readyState === WebSocket.OPEN) {
+              socket.send(e.data);
+            }
+          };
+
+          recorder.start(250);
+          setIsListening(true);
+        } catch (micErr) {
+          console.error("Mic access error:", micErr);
+          socket.close();
+        }
+      };
+
+      // 5️⃣ Receive transcripts from Deepgram
+      socket.onmessage = (msg) => {
+        try {
+          const data = JSON.parse(msg.data);
+          const transcript =
+            data?.channel?.alternatives?.[0]?.transcript ?? "";
+          const isFinal = data?.is_final ?? false;
+
+          if (transcript.trim()) {
+            onTranscript?.(transcript, isFinal);
+          }
+        } catch (parseErr) {
+          console.error("Deepgram parse error:", parseErr);
+        }
+      };
+
+      socket.onerror = (e) => {
+        console.error("Deepgram WebSocket error:", e);
+        stopListening();
+      };
+
+      socket.onclose = () => {
+        setIsListening(false);
+      };
+    } catch (err) {
+      console.error("STT start error:", err);
+      setIsListening(false);
+    }
+  }, [onTranscript]);
 
   const stopListening = useCallback(() => {
-    recognitionRef.current?.stop();
+    // Stop MediaRecorder
+    if (recorderRef.current && recorderRef.current.state !== "inactive") {
+      recorderRef.current.stop();
+    }
+    // Stop mic tracks
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    // Send CloseStream then close WebSocket
+    if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+      socketRef.current.send(JSON.stringify({ type: "CloseStream" }));
+      socketRef.current.close();
+    }
+
+    recorderRef.current = null;
+    streamRef.current = null;
+    socketRef.current = null;
+    setIsListening(false);
   }, []);
 
   return {
