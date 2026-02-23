@@ -14,8 +14,8 @@ interface Message {
   isStreaming?: boolean;
 }
 
-const SPEECH_RATE = 1.20;
-const AVERAGE_WORDS_PER_MINUTE = 160 * SPEECH_RATE;
+const SPEECH_RATE = 1.12;
+const AVERAGE_WORDS_PER_MINUTE = 150 * SPEECH_RATE;
 const WORD_DELAY_MS = 60000 / AVERAGE_WORDS_PER_MINUTE;
 
 export default function ChatbotWidget() {
@@ -189,7 +189,7 @@ export default function ChatbotWidget() {
             sentenceBuffer += (sentenceBuffer ? " " : "") + word;
             bufferWordCount++;
 
-            const sentenceEnded = /[.!?,—:]$/.test(word);
+            const sentenceEnded = /[]$/.test(word);
 
             if (
               (bufferWordCount >= MIN_WORDS_BEFORE_SPEAK && sentenceEnded) ||
