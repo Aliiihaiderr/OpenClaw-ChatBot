@@ -5,6 +5,9 @@ import ChatMessage from "./ChatMessage";
 import ChatInput from "./ChatInput";
 import Image from "next/image";
 import { useVoice } from "@/hooks/Usevoice";
+import { marked } from "marked";
+
+marked.setOptions({ breaks: true, gfm: true });
 
 type Role = "user" | "assistant";
 
@@ -13,10 +16,6 @@ interface Message {
   content: string;
   isStreaming?: boolean;
 }
-
-// const SPEECH_RATE = 1.12;
-// const AVERAGE_WORDS_PER_MINUTE = 150 * SPEECH_RATE;
-// const WORD_DELAY_MS = 500;
 
 export default function ChatbotWidget() {
   const [isOpen, setIsOpen] = useState(false);
@@ -30,7 +29,6 @@ export default function ChatbotWidget() {
     },
   ]);
 
-  // ✅ Tracks only FULLY COMPLETED exchanges (no streaming, no partial)
   const committedHistoryRef = useRef<Message[]>([
     {
       role: "assistant",
@@ -49,25 +47,18 @@ export default function ChatbotWidget() {
 
   const speakingMsgIdxRef = useRef<number>(-1);
   const messagesEndRef = useRef<HTMLDivElement>(null);
-
   const abortControllerRef = useRef<AbortController | null>(null);
   const generationRef = useRef<number>(0);
 
-  // ───────────── TTS Queue System ─────────────
-  // ───────────── TTS Queue System ─────────────
   // ───────────── TTS Queue System ─────────────
   const speechQueueRef = useRef<{ text: string; wordCount: number }[]>([]);
   const speakingRef = useRef(false);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const currentSourceRef = useRef<AudioBufferSourceNode | null>(null);
-
-  // ✅ Tracks ms-per-word based on actual audio duration
   const msPerWordRef = useRef<number>(500);
 
   const stopAudio = () => {
-    try {
-      currentSourceRef.current?.stop();
-    } catch {}
+    try { currentSourceRef.current?.stop(); } catch {}
     currentSourceRef.current = null;
     speakingRef.current = false;
   };
@@ -98,10 +89,8 @@ export default function ChatbotWidget() {
         audioCtxRef.current = new AudioContext();
       }
       const audioCtx = audioCtxRef.current;
-
       const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
 
-      // ✅ Calculate actual ms-per-word from real audio duration
       const audioDurationMs = audioBuffer.duration * 1000;
       msPerWordRef.current = Math.round(audioDurationMs / wordCount);
 
@@ -141,12 +130,7 @@ export default function ChatbotWidget() {
   };
 
   // ───────────── Voice Hook ─────────────
-  const {
-    isListening,
-    startListening,
-    stopListening,
-    sttSupported,
-  } = useVoice({
+  const { isListening, startListening, stopListening, sttSupported } = useVoice({
     onTranscript: (text, isFinal) => {
       if (isFinal) {
         setLiveSpeechBubble("");
@@ -179,24 +163,22 @@ export default function ChatbotWidget() {
     async (text: string) => {
       if (!text.trim()) return;
 
-      // ✅ Cancel previous generation
       cancelCurrentGeneration();
 
       const currentGeneration = generationRef.current;
       const abortController = new AbortController();
       abortControllerRef.current = abortController;
 
-      // ✅ Always read from committedHistoryRef — never from React state
-      // This is always clean: only fully completed exchanges
+      // Snapshot committed history BEFORE this exchange
       const baseHistory = committedHistoryRef.current;
-
       const userMsg: Message = { role: "user", content: text };
-      const newHistory: Message[] = [...baseHistory, userMsg];
-      const botPlaceholderIdx = newHistory.length;
 
-      // ✅ Set UI with committed history + new user msg + empty bot placeholder
+      // Layout: [...baseHistory, userMsg, botPlaceholder]
+      const botPlaceholderIdx = baseHistory.length + 1;
+
       setMessages([
-        ...newHistory,
+        ...baseHistory,
+        userMsg,
         { role: "assistant", content: "", isStreaming: true },
       ]);
 
@@ -205,113 +187,111 @@ export default function ChatbotWidget() {
       speakingMsgIdxRef.current = botPlaceholderIdx;
       setSpeakingMsgIdx(botPlaceholderIdx);
 
+      // Only updates the bot placeholder slot
+      const updateBotSlot = (content: string, isStreaming: boolean) => {
+        setMessages((prev) => {
+          const updated = [...prev];
+          updated[botPlaceholderIdx] = { role: "assistant", content, isStreaming };
+          return updated;
+        });
+      };
+
+      // TTS sentence buffering
+      const MIN_WORDS_BEFORE_SPEAK = 12;
+      let ttsBuffer = "";
+      let ttsWordCount = 0;
+
+      const flushTTSBuffer = () => {
+        if (!ttsBuffer.trim()) return;
+        speechQueueRef.current.push({ text: ttsBuffer.trim(), wordCount: ttsWordCount });
+        ttsBuffer = "";
+        ttsWordCount = 0;
+        processSpeechQueue();
+      };
+
       try {
         const res = await fetch("/api/chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          // ✅ Send only committed history to OpenClaw (no partial responses)
           body: JSON.stringify({ message: text, history: baseHistory }),
           signal: abortController.signal,
         });
 
+        if (!res.ok || !res.body) throw new Error("Stream failed");
         if (generationRef.current !== currentGeneration) return;
 
-        const { reply }: { reply: string } = await res.json();
         setLoading(false);
 
-        const plainText = reply
-          .replace(/<[^>]+>/g, " ")
-          .replace(/\s+/g, " ")
-          .trim();
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let rawMarkdown = "";
+        let streamDone = false;
 
-        const words = plainText.split(" ").filter(Boolean);
+        // Read until [DONE] or stream exhausted
+        while (!streamDone) {
+          const { done, value } = await reader.read();
+          if (done) break;
 
-        const streamWords = async () => {
-          let displayed = "";
-          for (let i = 0; i < words.length; i++) {
-            if (generationRef.current !== currentGeneration) return;
-
-            displayed += (i === 0 ? "" : " ") + words[i];
-            setMessages((prev) => {
-              const updated = [...prev];
-              updated[botPlaceholderIdx] = {
-                role: "assistant",
-                content: displayed,
-                isStreaming: true,
-              };
-              return updated;
-            });
-
-            // ✅ Use dynamic ms-per-word synced to actual audio speed
-            await new Promise((r) => setTimeout(r, msPerWordRef.current));
+          if (generationRef.current !== currentGeneration) {
+            reader.cancel();
+            return;
           }
 
-          if (generationRef.current !== currentGeneration) return;
+          const chunk = decoder.decode(value, { stream: true });
 
-          setMessages((prev) => {
-            const updated = [...prev];
-            updated[botPlaceholderIdx] = {
-              role: "assistant",
-              content: reply,
-              isStreaming: false,
-            };
-            return updated;
-          });
+          for (const line of chunk.split("\n")) {
+            if (!line.startsWith("data: ")) continue;
+            const data = line.slice(6).trim();
 
-          committedHistoryRef.current = [
-            ...newHistory,
-            { role: "assistant", content: reply, isStreaming: false },
-          ];
-        };
+            if (data === "[DONE]") {
+              streamDone = true;
+              break;
+            }
 
-        const queueTTS = () => {
-          if (generationRef.current !== currentGeneration) return;
+            try {
+              const parsed = JSON.parse(data);
+              if (parsed.error) throw new Error(parsed.error);
 
-          const MIN_WORDS_BEFORE_SPEAK = 12;
-          let sentenceBuffer = "";
-          let bufferWordCount = 0;
+              if (parsed.token) {
+                rawMarkdown += parsed.token;
 
-          for (let i = 0; i < words.length; i++) {
-            const word = words[i];
-            sentenceBuffer += (sentenceBuffer ? " " : "") + word;
-            bufferWordCount++;
+                const streamingHtml = await marked.parse(rawMarkdown);
+                if (generationRef.current !== currentGeneration) return;
+                updateBotSlot(streamingHtml, true);
 
-            const sentenceEnded = /[.!?,—:]$/.test(word);
-
-            if (
-              (bufferWordCount >= MIN_WORDS_BEFORE_SPEAK && sentenceEnded) ||
-              i === words.length - 1
-            ) {
-              // ✅ Pass wordCount so TTS can calculate ms-per-word
-              speechQueueRef.current.push({
-                text: sentenceBuffer.trim(),
-                wordCount: bufferWordCount,
-              });
-              sentenceBuffer = "";
-              bufferWordCount = 0;
-              processSpeechQueue();
+                // Feed TTS
+                const words = parsed.token.split(" ").filter(Boolean);
+                ttsBuffer += (ttsBuffer ? " " : "") + parsed.token.trim();
+                ttsWordCount += words.length;
+                if (ttsWordCount >= MIN_WORDS_BEFORE_SPEAK && /[.!?,—:]$/.test(parsed.token.trim())) {
+                  flushTTSBuffer();
+                }
+              }
+            } catch {
+              // skip malformed SSE lines
             }
           }
-        };
+        }
 
-        queueTTS();
-        await streamWords();
+        if (generationRef.current !== currentGeneration) return;
+
+        // Finalize: flush TTS, render final HTML, commit history
+        flushTTSBuffer();
+        const finalHtml = await marked.parse(rawMarkdown);
+        updateBotSlot(finalHtml, false);
+
+        // ✅ Commit completed exchange — correct variables, no newHistory
+        committedHistoryRef.current = [
+          ...baseHistory,
+          userMsg,
+          { role: "assistant", content: finalHtml },
+        ];
 
       } catch (err: any) {
         if (err?.name === "AbortError") return;
-
         console.error(err);
         if (generationRef.current !== currentGeneration) return;
-
-        setMessages((prev) => {
-          const updated = [...prev];
-          updated[botPlaceholderIdx] = {
-            role: "assistant",
-            content: "⚠️ Failed to get a response.",
-            isStreaming: false,
-          };
-          return updated;
-        });
+        updateBotSlot("⚠️ Failed to get a response.", false);
         resetSpeechSystem();
       } finally {
         if (generationRef.current === currentGeneration) {
@@ -358,11 +338,7 @@ export default function ChatbotWidget() {
           ))}
 
           {liveSpeechBubble && (
-            <ChatMessage
-              role="user"
-              content={liveSpeechBubble}
-              isLive={true}
-            />
+            <ChatMessage role="user" content={liveSpeechBubble} isLive={true} />
           )}
 
           <div ref={messagesEndRef} />

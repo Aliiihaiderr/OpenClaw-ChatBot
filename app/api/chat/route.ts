@@ -1,82 +1,102 @@
 // src/app/api/chat/route.ts
-// Install: npm install marked
+import { exec } from "child_process";
+import { marked } from "marked";
 
-import { exec } from 'child_process'
-import { promisify } from 'util'
-import { marked } from 'marked'
+marked.setOptions({ breaks: true, gfm: true });
 
-const execAsync = promisify(exec)
+const delay = (ms: number) => new Promise((res) => setTimeout(res, ms));
 
-type Role = 'user' | 'assistant'
-interface Message { role: Role; content: string }
+function stripAnsi(str: string): string {
+  return str
+    .replace(/\x1B\[[0-9;]*[A-Za-z]/g, "")
+    .replace(/\x1B\][^\x07]*\x07/g, "")
+    .replace(/[\x00-\x09\x0B\x0C\x0E-\x1F\x7F]/g, "");
+}
 
-// Configure marked
-marked.setOptions({
-  breaks: true,
-  gfm: true,
-})
+const JUNK_RE = /DeprecationWarning|ExperimentalWarning|^\s*🦞|^\s*[|\/\-\\o◒◐◓◑●○┤╡╢╖╕╣║╗╝╜╛┐└┴┬├─┼╞╟╚╔╩╦╠═╬╧╨╤╥╙╘╒╓╫╪┘┌]\s*$|^◇\s*$|^│\s*$/;
+
+function isJunk(line: string): boolean {
+  const t = line.trim();
+  if (!t) return true;
+  if (JUNK_RE.test(t)) return true;
+  return false;
+}
 
 export async function POST(req: Request) {
-  try {
-    const { message }: { message: string; history: Message[] } = await req.json()
+  const { message } = await req.json();
 
-    if (!message?.trim()) {
-      return Response.json({ reply: '' }, { status: 400 })
-    }
-    const escaped = message
-      .replace(/\\/g, '\\\\')
-      .replace(/"/g, '\\"')
-
-    const { stdout, stderr } = await execAsync(
-      `openclaw agent --agent main --message "${escaped}"`,
-      {
-        timeout: 60_000,
-        windowsHide: true,
-      }
-    )
-
-    console.log('raw stdout:', JSON.stringify(stdout))
-    if (stderr) console.log('stderr:', stderr)
-    const spinnerChars = new Set(['|', '/', '-', '\\', 'o', '◒', '◐', '◓', '◑', '●', '○'])
-
-    const lines = stdout
-      .split('\n')
-      .map(l => l.trim())
-      .filter(l => l.length > 0)
-
-    // Filter out spinner lines
-    const replyLines = lines.filter(l => {
-      if (l.length <= 2 && spinnerChars.has(l)) return false
-      if (l.startsWith('🦞')) return false
-      if (l.includes('DeprecationWarning')) return false
-      return true
-    })
-    
-    const markdownReply = replyLines.join('\n').trim()
-    
-    if (!markdownReply) {
-      return Response.json({ reply: 'No response received.' })
-    }
-
-    // Convert Markdown to HTML
-    const htmlReply = await marked.parse(markdownReply)
-    
-    return Response.json({ reply: htmlReply })
-
-  } catch (error: unknown) {
-    console.error('API route error:', error)
-    const err = error as { stdout?: string; stderr?: string; message?: string }
-    
-    if (err?.stdout) {
-      const lines = err.stdout.split('\n').map((l: string) => l.trim()).filter((l: string) => l && l.length > 2)
-      const reply = lines[lines.length - 1]
-      if (reply) return Response.json({ reply })
-    }
-    
-    const detail = err?.stderr || err?.message || 'Unknown error'
-    return Response.json(
-      { reply: `⚠️ Agent error: ${detail.slice(0, 300)}` },
-      { status: 200 }
-    )
+  if (!message?.trim()) {
+    return new Response("Bad request", { status: 400 });
   }
+
+  const encoder = new TextEncoder();
+
+  const stream = new ReadableStream({
+    async start(controller) {
+      const send = (token: string) => {
+        controller.enqueue(
+          encoder.encode(`data: ${JSON.stringify({ token })}\n\n`)
+        );
+      };
+
+      // ✅ Escape the message for shell — replace " with \" 
+      const escaped = message.replace(/"/g, '\\"');
+      const cmd = `openclaw agent --agent main --message "${escaped}"`;
+
+      const result = await new Promise<{ stdout: string; stderr: string }>(
+        (resolve) => {
+          exec(cmd, { timeout: 120_000, windowsHide: true }, (err, stdout, stderr) => {
+            resolve({ stdout: stdout || "", stderr: stderr || "" });
+          });
+        }
+      );
+
+      if (req.signal?.aborted) {
+        controller.close();
+        return;
+      }
+
+      console.log("=== STDOUT ===\n", JSON.stringify(result.stdout));
+      console.log("=== STDERR ===\n", JSON.stringify(result.stderr));
+
+      // Clean the output — strip ANSI, remove junk lines
+      const fullText = stripAnsi(result.stdout)
+        .split("\n")
+        .filter((l) => !isJunk(l))
+        .map((l) => l.trim())
+        .filter(Boolean)
+        .join("\n")
+        .trim();
+
+      console.log("=== FINAL TEXT ===\n", JSON.stringify(fullText));
+
+      if (!fullText) {
+        send("⚠️ No response received from agent.\n");
+        controller.enqueue(encoder.encode(`data: [DONE]\n\n`));
+        controller.close();
+        return;
+      }
+
+      // Stream word by word
+      const WORD_DELAY_MS = 40;
+      for (const token of fullText.split(/(\s+)/)) {
+        if (req.signal?.aborted) break;
+        if (token) {
+          send(token);
+          await delay(WORD_DELAY_MS);
+        }
+      }
+
+      controller.enqueue(encoder.encode(`data: [DONE]\n\n`));
+      controller.close();
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+    },
+  });
 }
