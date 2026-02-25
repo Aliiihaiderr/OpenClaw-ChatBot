@@ -14,9 +14,9 @@ interface Message {
   isStreaming?: boolean;
 }
 
-const SPEECH_RATE = 1.12;
-const AVERAGE_WORDS_PER_MINUTE = 150 * SPEECH_RATE;
-const WORD_DELAY_MS = 60000 / AVERAGE_WORDS_PER_MINUTE;
+// const SPEECH_RATE = 1.12;
+// const AVERAGE_WORDS_PER_MINUTE = 150 * SPEECH_RATE;
+// const WORD_DELAY_MS = 500;
 
 export default function ChatbotWidget() {
   const [isOpen, setIsOpen] = useState(false);
@@ -25,7 +25,18 @@ export default function ChatbotWidget() {
       role: "assistant",
       content:
         "👋 Hi! I'm the Builderz assistant.\n" +
-        "Ask me anything about our blockchain development services, projects, or\n" +
+        "Ask me anything about our blockchain development services, projects, or\n  " +
+        "how we can help bring your Web3 ideas to life!",
+    },
+  ]);
+
+  // ✅ Tracks only FULLY COMPLETED exchanges (no streaming, no partial)
+  const committedHistoryRef = useRef<Message[]>([
+    {
+      role: "assistant",
+      content:
+        "👋 Hi! I'm the Builderz assistant.\n" +
+        "Ask me anything about our blockchain development services, projects, or\n  " +
         "how we can help bring your Web3 ideas to life!",
     },
   ]);
@@ -39,11 +50,29 @@ export default function ChatbotWidget() {
   const speakingMsgIdxRef = useRef<number>(-1);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // ───────────── TTS Queue System ─────────────
-  const speechQueueRef = useRef<string[]>([]);
-  const speakingRef = useRef(false);
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const generationRef = useRef<number>(0);
 
-  const processSpeechQueue = useCallback(() => {
+  // ───────────── TTS Queue System ─────────────
+  // ───────────── TTS Queue System ─────────────
+  // ───────────── TTS Queue System ─────────────
+  const speechQueueRef = useRef<{ text: string; wordCount: number }[]>([]);
+  const speakingRef = useRef(false);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const currentSourceRef = useRef<AudioBufferSourceNode | null>(null);
+
+  // ✅ Tracks ms-per-word based on actual audio duration
+  const msPerWordRef = useRef<number>(500);
+
+  const stopAudio = () => {
+    try {
+      currentSourceRef.current?.stop();
+    } catch {}
+    currentSourceRef.current = null;
+    speakingRef.current = false;
+  };
+
+  const processSpeechQueue = useCallback(async () => {
     if (speakingRef.current) return;
     if (speechQueueRef.current.length === 0) {
       speakingMsgIdxRef.current = -1;
@@ -52,26 +81,63 @@ export default function ChatbotWidget() {
     }
 
     speakingRef.current = true;
-    const text = speechQueueRef.current.shift()!;
-    const utterance = new SpeechSynthesisUtterance(text);
+    const { text, wordCount } = speechQueueRef.current.shift()!;
 
-    utterance.rate = SPEECH_RATE;
-    utterance.pitch = 1;
+    try {
+      const res = await fetch("/api/tts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
 
-    utterance.onend = () => {
+      if (!res.ok) throw new Error("TTS fetch failed");
+
+      const arrayBuffer = await res.arrayBuffer();
+
+      if (!audioCtxRef.current) {
+        audioCtxRef.current = new AudioContext();
+      }
+      const audioCtx = audioCtxRef.current;
+
+      const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+
+      // ✅ Calculate actual ms-per-word from real audio duration
+      const audioDurationMs = audioBuffer.duration * 1000;
+      msPerWordRef.current = Math.round(audioDurationMs / wordCount);
+
+      const source = audioCtx.createBufferSource();
+      currentSourceRef.current = source;
+      source.buffer = audioBuffer;
+      source.connect(audioCtx.destination);
+
+      source.onended = () => {
+        currentSourceRef.current = null;
+        speakingRef.current = false;
+        processSpeechQueue();
+      };
+
+      source.start();
+    } catch (err) {
+      console.error("TTS playback error:", err);
       speakingRef.current = false;
       processSpeechQueue();
-    };
-
-    window.speechSynthesis.speak(utterance);
+    }
   }, []);
 
   const resetSpeechSystem = () => {
-    window.speechSynthesis.cancel();
+    stopAudio();
     speechQueueRef.current = [];
-    speakingRef.current = false;
     speakingMsgIdxRef.current = -1;
     setSpeakingMsgIdx(-1);
+  };
+
+  const cancelCurrentGeneration = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+    generationRef.current += 1;
+    resetSpeechSystem();
   };
 
   // ───────────── Voice Hook ─────────────
@@ -79,8 +145,6 @@ export default function ChatbotWidget() {
     isListening,
     startListening,
     stopListening,
-    isSpeaking,
-    stopSpeaking,
     sttSupported,
   } = useVoice({
     onTranscript: (text, isFinal) => {
@@ -115,13 +179,22 @@ export default function ChatbotWidget() {
     async (text: string) => {
       if (!text.trim()) return;
 
-      resetSpeechSystem();
+      // ✅ Cancel previous generation
+      cancelCurrentGeneration();
+
+      const currentGeneration = generationRef.current;
+      const abortController = new AbortController();
+      abortControllerRef.current = abortController;
+
+      // ✅ Always read from committedHistoryRef — never from React state
+      // This is always clean: only fully completed exchanges
+      const baseHistory = committedHistoryRef.current;
 
       const userMsg: Message = { role: "user", content: text };
-      const historySnapshot = [...messages];
-      const newHistory: Message[] = [...messages, userMsg];
+      const newHistory: Message[] = [...baseHistory, userMsg];
       const botPlaceholderIdx = newHistory.length;
 
+      // ✅ Set UI with committed history + new user msg + empty bot placeholder
       setMessages([
         ...newHistory,
         { role: "assistant", content: "", isStreaming: true },
@@ -129,7 +202,6 @@ export default function ChatbotWidget() {
 
       setInput("");
       setLoading(true);
-
       speakingMsgIdxRef.current = botPlaceholderIdx;
       setSpeakingMsgIdx(botPlaceholderIdx);
 
@@ -137,8 +209,12 @@ export default function ChatbotWidget() {
         const res = await fetch("/api/chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ message: text, history: historySnapshot }),
+          // ✅ Send only committed history to OpenClaw (no partial responses)
+          body: JSON.stringify({ message: text, history: baseHistory }),
+          signal: abortController.signal,
         });
+
+        if (generationRef.current !== currentGeneration) return;
 
         const { reply }: { reply: string } = await res.json();
         setLoading(false);
@@ -150,10 +226,11 @@ export default function ChatbotWidget() {
 
         const words = plainText.split(" ").filter(Boolean);
 
-        // ── Parallel: stream words visually at WORD_DELAY_MS pace ──
         const streamWords = async () => {
           let displayed = "";
           for (let i = 0; i < words.length; i++) {
+            if (generationRef.current !== currentGeneration) return;
+
             displayed += (i === 0 ? "" : " ") + words[i];
             setMessages((prev) => {
               const updated = [...prev];
@@ -164,9 +241,13 @@ export default function ChatbotWidget() {
               };
               return updated;
             });
-            await new Promise((r) => setTimeout(r, WORD_DELAY_MS));
+
+            // ✅ Use dynamic ms-per-word synced to actual audio speed
+            await new Promise((r) => setTimeout(r, msPerWordRef.current));
           }
-          // Final: replace with HTML version
+
+          if (generationRef.current !== currentGeneration) return;
+
           setMessages((prev) => {
             const updated = [...prev];
             updated[botPlaceholderIdx] = {
@@ -176,10 +257,16 @@ export default function ChatbotWidget() {
             };
             return updated;
           });
+
+          committedHistoryRef.current = [
+            ...newHistory,
+            { role: "assistant", content: reply, isStreaming: false },
+          ];
         };
 
-        // ── Parallel: queue TTS sentences immediately ──
         const queueTTS = () => {
+          if (generationRef.current !== currentGeneration) return;
+
           const MIN_WORDS_BEFORE_SPEAK = 12;
           let sentenceBuffer = "";
           let bufferWordCount = 0;
@@ -189,13 +276,17 @@ export default function ChatbotWidget() {
             sentenceBuffer += (sentenceBuffer ? " " : "") + word;
             bufferWordCount++;
 
-            const sentenceEnded = /[]$/.test(word);
+            const sentenceEnded = /[.!?,—:]$/.test(word);
 
             if (
               (bufferWordCount >= MIN_WORDS_BEFORE_SPEAK && sentenceEnded) ||
               i === words.length - 1
             ) {
-              speechQueueRef.current.push(sentenceBuffer.trim());
+              // ✅ Pass wordCount so TTS can calculate ms-per-word
+              speechQueueRef.current.push({
+                text: sentenceBuffer.trim(),
+                wordCount: bufferWordCount,
+              });
               sentenceBuffer = "";
               bufferWordCount = 0;
               processSpeechQueue();
@@ -203,12 +294,15 @@ export default function ChatbotWidget() {
           }
         };
 
-        // 🔥 Run both in parallel — TTS starts immediately, stream runs on its own timer
-        queueTTS();        // synchronous, queues all sentences instantly
-        await streamWords(); // async, streams word-by-word at visual pace
+        queueTTS();
+        await streamWords();
 
-      } catch (err) {
+      } catch (err: any) {
+        if (err?.name === "AbortError") return;
+
         console.error(err);
+        if (generationRef.current !== currentGeneration) return;
+
         setMessages((prev) => {
           const updated = [...prev];
           updated[botPlaceholderIdx] = {
@@ -220,10 +314,12 @@ export default function ChatbotWidget() {
         });
         resetSpeechSystem();
       } finally {
-        setLoading(false);
+        if (generationRef.current === currentGeneration) {
+          setLoading(false);
+        }
       }
     },
-    [messages, processSpeechQueue]
+    [processSpeechQueue]
   );
 
   return (
