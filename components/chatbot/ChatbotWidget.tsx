@@ -197,15 +197,14 @@ export default function ChatbotWidget() {
       };
 
       // TTS sentence buffering
-      const MIN_WORDS_BEFORE_SPEAK = 12;
       let ttsBuffer = "";
-      let ttsWordCount = 0;
 
       const flushTTSBuffer = () => {
         if (!ttsBuffer.trim()) return;
-        speechQueueRef.current.push({ text: ttsBuffer.trim(), wordCount: ttsWordCount });
-        ttsBuffer = "";
-        ttsWordCount = 0;
+        speechQueueRef.current.push({
+          text: ttsBuffer.trim(),
+          wordCount: ttsBuffer.trim().split(/\s+/).length,
+        });
         processSpeechQueue();
       };
 
@@ -259,13 +258,77 @@ export default function ChatbotWidget() {
                 if (generationRef.current !== currentGeneration) return;
                 updateBotSlot(streamingHtml, true);
 
-                // Feed TTS
-                const words = parsed.token.split(" ").filter(Boolean);
-                ttsBuffer += (ttsBuffer ? " " : "") + parsed.token.trim();
-                ttsWordCount += words.length;
-                if (ttsWordCount >= MIN_WORDS_BEFORE_SPEAK && /[.!?,—:]$/.test(parsed.token.trim())) {
-                  flushTTSBuffer();
+                // ✅ --- PARALLEL TTS LOGIC ---
+                const plainChunk = parsed.token
+                  // remove bold/italic markers
+                  .replace(/[*_~`]+/g, "")
+                  // remove markdown links [text](url)
+                  .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+                  // remove headers ###
+                  .replace(/^#+\s/gm, "")
+                  // remove list markers
+                  .replace(/^\s*[-*+]\s+/gm, "")
+                  // remove extra newlines
+                  .replace(/\n+/g, " ");
+                ttsBuffer += plainChunk;
+
+                // Intelligent boundary detection
+                const boundaryRegex = /(.+?[.!?]+[\s"')\]]*|.+?:\s|.+?\n)/g;
+
+                let match;
+                let lastIndex = 0;
+
+                while ((match = boundaryRegex.exec(ttsBuffer)) !== null) {
+                  const chunk = match[0].trim();
+
+                  if (chunk.length > 0) {
+                    speechQueueRef.current.push({
+                      text: chunk,
+                      wordCount: chunk.split(/\s+/).length,
+                    });
+                  }
+
+                  lastIndex = boundaryRegex.lastIndex;
                 }
+
+                // Remove processed part
+                if (lastIndex > 0) {
+                  ttsBuffer = ttsBuffer.slice(lastIndex);
+                  processSpeechQueue();
+                }
+
+                if (lastIndex === 0) {
+                  const words = ttsBuffer.trim().split(/\s+/);
+
+                  if (words.length > 12) {
+                    const chunk = words.slice(0, 12).join(" ");
+
+                    speechQueueRef.current.push({
+                      text: chunk,
+                      wordCount: 12,
+                    });
+
+                    ttsBuffer = words.slice(12).join(" ");
+                    processSpeechQueue();
+                  }
+                }
+
+                // if (sentences) {
+                //   for (const sentence of sentences) {
+                //     speechQueueRef.current.push({
+                //       text: sentence.trim(),
+                //       wordCount: sentence.trim().split(/\s+/).length,
+                //     });
+                //   }
+
+                //   processSpeechQueue();
+
+                //   // Remove spoken sentences from buffer
+                //   const lastIndex = ttsBuffer.lastIndexOf(sentences[sentences.length - 1]);
+                //   ttsBuffer = ttsBuffer.slice(
+                //     lastIndex + sentences[sentences.length - 1].length
+                //   );
+                // }
               }
             } catch {
               // skip malformed SSE lines
