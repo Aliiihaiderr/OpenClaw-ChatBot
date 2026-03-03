@@ -1,82 +1,76 @@
-// src/app/api/chat/route.ts
-// Install: npm install marked
-
-import { exec } from 'child_process'
-import { promisify } from 'util'
-import { marked } from 'marked'
-
-const execAsync = promisify(exec)
-
-type Role = 'user' | 'assistant'
-interface Message { role: Role; content: string }
-
-// Configure marked
-marked.setOptions({
-  breaks: true,
-  gfm: true,
-})
+import { marked } from "marked"
 
 export async function POST(req: Request) {
   try {
-    const { message }: { message: string; history: Message[] } = await req.json()
+    const { message, history } = await req.json()
 
     if (!message?.trim()) {
-      return Response.json({ reply: '' }, { status: 400 })
+      return Response.json({ reply: "" }, { status: 400 })
     }
-    const escaped = message
-      .replace(/\\/g, '\\\\')
-      .replace(/"/g, '\\"')
 
-    const { stdout, stderr } = await execAsync(
-      `openclaw agent --agent main --message "${escaped}"`,
-      {
-        timeout: 60_000,
-        windowsHide: true,
-      }
-    )
+    const messages = [
+      ...(history || []),
+      { role: "user", content: message }
+    ]
 
-    console.log('raw stdout:', JSON.stringify(stdout))
-    if (stderr) console.log('stderr:', stderr)
-    const spinnerChars = new Set(['|', '/', '-', '\\', 'o', '◒', '◐', '◓', '◑', '●', '○'])
-
-    const lines = stdout
-      .split('\n')
-      .map(l => l.trim())
-      .filter(l => l.length > 0)
-
-    // Filter out spinner lines
-    const replyLines = lines.filter(l => {
-      if (l.length <= 2 && spinnerChars.has(l)) return false
-      if (l.startsWith('🦞')) return false
-      if (l.includes('DeprecationWarning')) return false
-      return true
+    const response = await fetch("http://127.0.0.1:18789/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer 7e127df48f77b05aaaa6411d6bdac73cf918cc8b5253aa56",
+        "Content-Type": "application/json",
+        "x-openclaw-agent-id": "main"
+      },
+      body: JSON.stringify({
+        model: "openclaw",
+        messages,
+        stream: true   // streaming enabled
+      })
     })
-    
-    const markdownReply = replyLines.join('\n').trim()
-    
-    if (!markdownReply) {
-      return Response.json({ reply: 'No response received.' })
+
+    if (!response.ok || !response.body) {
+      throw new Error("OpenClaw API error")
     }
 
-    // Convert Markdown to HTML
-    const htmlReply = await marked.parse(markdownReply)
-    
+    // ── Read the full SSE stream and accumulate the text ──
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let fullText = ""
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+
+      const chunk = decoder.decode(value, { stream: true })
+      const lines = chunk.split("\n")
+
+      for (const line of lines) {
+        // SSE lines look like: data: {...}
+        if (!line.startsWith("data:")) continue
+
+        const raw = line.replace(/^data:\s*/, "").trim()
+
+        // Stream ends with this sentinel
+        if (raw === "[DONE]") break
+
+        try {
+          const parsed = JSON.parse(raw)
+          const delta = parsed?.choices?.[0]?.delta?.content
+          if (delta) fullText += delta
+        } catch {
+          // ignore malformed chunks
+        }
+      }
+    }
+
+    if (!fullText) {
+      return Response.json({ reply: "No response received." })
+    }
+
+    const htmlReply = await marked.parse(fullText)
     return Response.json({ reply: htmlReply })
 
-  } catch (error: unknown) {
-    console.error('API route error:', error)
-    const err = error as { stdout?: string; stderr?: string; message?: string }
-    
-    if (err?.stdout) {
-      const lines = err.stdout.split('\n').map((l: string) => l.trim()).filter((l: string) => l && l.length > 2)
-      const reply = lines[lines.length - 1]
-      if (reply) return Response.json({ reply })
-    }
-    
-    const detail = err?.stderr || err?.message || 'Unknown error'
-    return Response.json(
-      { reply: `⚠️ Agent error: ${detail.slice(0, 300)}` },
-      { status: 200 }
-    )
+  } catch (error) {
+    console.error("Error:", error)
+    return Response.json({ reply: "Something went wrong." }, { status: 500 })
   }
 }

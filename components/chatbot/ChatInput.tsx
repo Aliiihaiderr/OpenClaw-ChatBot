@@ -5,12 +5,12 @@ import { useState } from "react";
 interface Props {
   onSend: (message: string) => void;
   disabled?: boolean;
-  // ── voice props (passed from ChatbotWidget) ──
+  // voice props (passed from ChatbotWidget)
   interimTranscript?: string;
   isListening?: boolean;
   onMicToggle?: () => void;
   sttSupported?: boolean;
-  // ── controlled input (typed text only — voice auto-sends now) ──
+  // controlled input (typed text only — voice auto-sends now)
   voiceInput?: string;
   setVoiceInput?: (val: string) => void;
 }
@@ -41,11 +41,6 @@ export default function ChatInput({
   return (
     <div className="p-3 border-t bg-white rounded-b-2xl">
 
-      {/*
-        NOTE: We no longer show interim transcript here as text —
-        the live speech bubble in the chat area handles that visually.
-        We only show the "listening" pill indicator while mic is active.
-      */}
       {isListening && !interimTranscript && (
         <p className="text-xs text-gray-400 italic px-1 mb-1 flex items-center gap-1">
           <span className="inline-block w-2 h-2 rounded-full bg-red-400 animate-pulse" />

@@ -26,7 +26,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "TTS failed" }, { status: 500 });
     }
 
-    // ✅ Stream audio directly back to frontend
+    // Stream audio directly back to frontend
     return new Response(response.body, {
       headers: {
         "Content-Type": "audio/mpeg",

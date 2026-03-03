@@ -30,7 +30,7 @@ export default function ChatbotWidget() {
     },
   ]);
 
-  // ✅ Tracks only FULLY COMPLETED exchanges (no streaming, no partial)
+  // Tracks only FULLY COMPLETED exchanges (no streaming, no partial)
   const committedHistoryRef = useRef<Message[]>([
     {
       role: "assistant",
@@ -53,15 +53,13 @@ export default function ChatbotWidget() {
   const abortControllerRef = useRef<AbortController | null>(null);
   const generationRef = useRef<number>(0);
 
-  // ───────────── TTS Queue System ─────────────
-  // ───────────── TTS Queue System ─────────────
-  // ───────────── TTS Queue System ─────────────
+  // TTS Queue System
   const speechQueueRef = useRef<{ text: string; wordCount: number }[]>([]);
   const speakingRef = useRef(false);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const currentSourceRef = useRef<AudioBufferSourceNode | null>(null);
 
-  // ✅ Tracks ms-per-word based on actual audio duration
+  // Tracks ms-per-word based on actual audio duration
   const msPerWordRef = useRef<number>(500);
 
   const stopAudio = () => {
@@ -101,7 +99,7 @@ export default function ChatbotWidget() {
 
       const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
 
-      // ✅ Calculate actual ms-per-word from real audio duration
+      // Calculate actual ms-per-word from real audio duration
       const audioDurationMs = audioBuffer.duration * 1000;
       msPerWordRef.current = Math.round(audioDurationMs / wordCount);
 
@@ -140,7 +138,7 @@ export default function ChatbotWidget() {
     resetSpeechSystem();
   };
 
-  // ───────────── Voice Hook ─────────────
+  // Voice Hook
   const {
     isListening,
     startListening,
@@ -174,19 +172,19 @@ export default function ChatbotWidget() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, liveSpeechBubble]);
 
-  // ───────────── SEND MESSAGE ─────────────
+  // SEND MESSAGE
   const sendMessage = useCallback(
     async (text: string) => {
       if (!text.trim()) return;
 
-      // ✅ Cancel previous generation
+      // Cancel previous generation
       cancelCurrentGeneration();
 
       const currentGeneration = generationRef.current;
       const abortController = new AbortController();
       abortControllerRef.current = abortController;
 
-      // ✅ Always read from committedHistoryRef — never from React state
+      // Always read from committedHistoryRef — never from React state
       // This is always clean: only fully completed exchanges
       const baseHistory = committedHistoryRef.current;
 
@@ -194,7 +192,7 @@ export default function ChatbotWidget() {
       const newHistory: Message[] = [...baseHistory, userMsg];
       const botPlaceholderIdx = newHistory.length;
 
-      // ✅ Set UI with committed history + new user msg + empty bot placeholder
+      // Set UI with committed history + new user msg + empty bot placeholder
       setMessages([
         ...newHistory,
         { role: "assistant", content: "", isStreaming: true },
@@ -209,7 +207,7 @@ export default function ChatbotWidget() {
         const res = await fetch("/api/chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          // ✅ Send only committed history to OpenClaw (no partial responses)
+          // Send only committed history to OpenClaw (no partial responses)
           body: JSON.stringify({ message: text, history: baseHistory }),
           signal: abortController.signal,
         });
@@ -242,7 +240,7 @@ export default function ChatbotWidget() {
               return updated;
             });
 
-            // ✅ Use dynamic ms-per-word synced to actual audio speed
+            // Use dynamic ms-per-word synced to actual audio speed
             await new Promise((r) => setTimeout(r, msPerWordRef.current));
           }
 
@@ -276,13 +274,13 @@ export default function ChatbotWidget() {
             sentenceBuffer += (sentenceBuffer ? " " : "") + word;
             bufferWordCount++;
 
-            const sentenceEnded = /[.!?,—:]$/.test(word);
+            const sentenceEnded = /[.!?:]$/.test(word);
 
             if (
               (bufferWordCount >= MIN_WORDS_BEFORE_SPEAK && sentenceEnded) ||
               i === words.length - 1
             ) {
-              // ✅ Pass wordCount so TTS can calculate ms-per-word
+              // Pass wordCount so TTS can calculate ms-per-word
               speechQueueRef.current.push({
                 text: sentenceBuffer.trim(),
                 wordCount: bufferWordCount,

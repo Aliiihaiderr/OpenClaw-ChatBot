@@ -4,8 +4,8 @@ interface Props {
   role: "user" | "bot" | "assistant";
   content: string;
   isSpeaking?: boolean;
-  isLive?: boolean;       // true when this is an interim voice transcript bubble
-  isStreaming?: boolean;  // true while the bot response is still streaming in
+  isLive?: boolean;
+  isStreaming?: boolean;
 }
 
 export default function ChatMessage({
