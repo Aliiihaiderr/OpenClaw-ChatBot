@@ -295,6 +295,7 @@ export default function ChatbotWidget() {
         queueTTS();
         await streamWords();
 
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       } catch (err: any) {
         if (err?.name === "AbortError") return;
 
@@ -317,6 +318,7 @@ export default function ChatbotWidget() {
         }
       }
     },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [processSpeechQueue]
   );
 
